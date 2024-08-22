@@ -1,0 +1,238 @@
+---
+title: "2. Pixel Classification"
+author: "Jon Sporring"
+date: "14/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# The Case
+
+The red and green images were produced to ask the following question:
+
+>How many red pixels there are in the near vicinity of the bright green pixels?
+
+To answer this we need a number two new tools: pixel classification and mathematical morphology.
+
+In the following, we will work with cilier, protein, and roi, and we will use piping (<https://www.datacamp.com/community/tutorials/pipe-r-tutorial> also part of the tidyverse package):
+
+```{r}
+library(magick)
+library(magrittr)
+library(ggplot2)
+library(gridExtra)
+
+# we are going to look at minimum and maximum values of the first image frequently.
+image_min <- function(image) { min(as.integer(image[[1]])) }
+image_max <- function(image) { max(as.integer(image[[1]])) }
+
+geom <- geometry_area(40,30,460,475)
+cilier <- image_read("Image_34362.tif")
+protein <- image_read("Image_34363.tif")
+
+cilierGray <- cilier %>% image_crop(geom) %>% image_convert(colorspace="gray")
+proteinGray <- protein %>% image_crop(geom) %>% image_convert(colorspace="gray")
+
+cilierGrayMin <- image_min(cilierGray)
+cilierGrayMax <- image_max(cilierGray)
+proteinGrayMin <- image_min(proteinGray)
+proteinGrayMax <- image_max(proteinGray)
+
+print(paste("Range of cilierGray: ", cilierGrayMin, ":", cilierGrayMax))
+print(paste("Range of proteinGray: ", proteinGrayMin, ":", proteinGrayMax))
+
+cilierPlt <- image_ggplot(cilierGray)
+proteinPlt <- image_ggplot(proteinGray)
+grid.arrange(cilierPlt,proteinPlt,nrow=1,ncol=2)
+```
+
+# Pixel classification
+The simplest pixel classification algorithm is Thresholding. Thresholding a single channel is the process of assigning a 1 (or 255 or white), if the value is above a threshold and 0 (or black) otherwise. To decide on a threshold, we first look at the histogram.
+
+```{r}
+pltHist <- qplot(as.double(cilierGray[[1]]),geom="histogram",bins=100)
+pltHist+labs(title="Histogram of cilierGray",x="intensity",y="count")
+```
+
+We used as.double, which means that the range of possible values are converted to [0,1], and we see that it's mainly black since it has a lot of low values, and its values do not extend much beyond 0.37. The function image_threshold allows us to clamp all values below a threshold to 0 and all values above to 1 in 2 steps. Its arguments is in percentage of the possible range. I.e., if we want all the values belo 0.1 to be black and the rest to be white, we do the following:
+
+```{r}
+cilierT = 0.1
+# We are going to threshold a lot, so let's make a function for it
+my_threshold <- function(image, t) {
+  tStr <- paste(100*t,"%",sep="") # image_threshold threshold argument at 0.1 must be on the form "10%"
+  image %>%
+  image_threshold(type = "white", threshold = tStr) %>%
+  image_threshold(type = "black", threshold = tStr) %>%
+  image_convert(colorspace="gray") # newer versions returns sRGB images
+}
+cilierMask <- my_threshold(cilierGray,cilierT)
+print(paste("Range of cilierMask: ", image_min(cilierMask), ":", image_max(cilierMask)))
+
+pltMask <- image_ggplot(cilierMask)
+pltHist <- qplot(as.double(cilierMask[[1]]),geom="histogram",bins=100)
+pltHist <- pltHist+labs(title="Histogram of cilierMask",x="intensity",y="count")
+grid.arrange(pltMask,pltHist,nrow=1,ncol=2)
+```
+
+We see that the result is an image whos values are either 0 or 255 using as.integer, which is converted to either 0 or 1 when using as.double.
+
+The threshold 75 was arbitrarily chosen, so let's investigate several thresholds:
+
+```{r}
+for (t in c(0.05,.1,.15,.20,.25,.30))
+{
+  cilierMaskTest <- my_threshold(cilierGray,t)
+  print(image_ggplot(cilierMaskTest)) # we use print to force output 
+}
+```
+
+We decide that 20% is the better choice. 
+
+```{r}
+cilierT <- 0.2
+cilierMask <- my_threshold(cilierGray,cilierT)
+image_ggplot(cilierMask)
+```
+
+A typical task is to calculate the area of segments. Our segment cilierMask is a [0,1] image where each pixels represents an pixel^2 area. Hence
+
+```{r}
+# Image magick in R does not include a function for calculating sums, so we make one ourselves
+my_sum <- function(image) {
+  sum(as.double(image[[1]]))
+}
+# Since cilierMask is (in double) either 0 or 1, its sum is its area.
+cilierArea <- my_sum(cilierMask)
+print(paste("The cilier area is: ", cilierArea))
+```
+
+---
+
+## Assignment 2.1
+The image proteinGray is very dark, so rescale it to full range [0,1] using image_fx, and call the result proteinScaled. Find a suitable threshold-value proteinScaled as proteinT, and calculate its area as proteinArea.
+
+```{r}
+proteinScaled <- image_fx(proteinGray,"(u-minima)/(maxima-minima)")
+print(image_ggplot(proteinScaled))
+
+pltHist <- qplot(as.double(proteinScaled[[1]]),geom="histogram",bins=100)
+pltHist <- pltHist+labs(title="Histogram of proteinScaled",x="intensity",y="count")
+print(pltHist)
+
+for (t in c(.2,.3,.4,.5,.6,.7))
+{
+  proteinMaskTest <- my_threshold(proteinScaled,t)
+  print(image_ggplot(proteinMaskTest)) # we use print to force output 
+}
+
+proteinT = 0.3
+proteinMask <- my_threshold(proteinScaled,proteinT)
+print(image_ggplot(proteinMask))
+proteinArea <- my_sum(proteinMask)
+print(paste("The cilier area is: ", proteinArea))
+```
+
+---
+
+The cilierMask is a model of where the cilier is, and we would like to investigate the amount of protein in its the vicinity. For this we can use the dilation function from Mathematical Morphology, which enlarges white areas. Dilation needs a structuring element, which defines how the dilation is to be performed. Here we use the rotational symmetric disk element:
+
+```{r}
+cilierMaskDil <- image_morphology(cilierMask,'Dilate', "Disk:2")
+image_ggplot(cilierMaskDil)
+```
+
+To get an idea of the effect of the dilation, we can calculate the absolute difference between the original and the dilated:
+
+```{r}
+image_join(cilierMaskDil,cilierMask) %>% image_fx_sequence("abs(u-v)") %>% image_ggplot()
+```
+
+and we see, that we have added a rim of width 2 pixels. Which disk size is the right, is a modelling aspect, so it's probably a good idea to investigate a number of disk sizes:
+
+```{r}
+for (sz in c(1,3,5))
+{
+  szStr <- paste("Disk:",sz,sep="")
+  print(szStr)
+  cilierMaskDilTest <- image_morphology(cilierMask,"Dilate",szStr)
+  print(image_ggplot(cilierMaskDilTest))
+}
+```
+
+We decide that a disk of size 3 is good. For efficiency we convert it to a logical 2d array:
+
+```{r}
+cilierSz <- "Disk:3"
+cilierMaskDil <- image_morphology(cilierMask,'Dilate', cilierSz)
+image_ggplot(cilierMaskDil)
+```
+
+We can use the dilated mask to count the pixel-values in the original cilierGray by multiplying the original with the dilated mask and then summing the result:
+```{r}
+cilierGrayMasked <- image_join(cilierGray,cilierMaskDil) %>% image_fx_sequence("u*v") # fx_sequence treats mask as a [0,1] image!
+image_ggplot(cilierGrayMasked)
+activity <- my_sum(cilierGrayMasked)
+print(paste("The sum of cilier-intensity-values in the mask is: ", activity))
+```
+
+---
+
+## Assignment 2.2
+Produce a mask of the cropped cilier by thresholding and expand this mask using dilation with a border of 3 pixels. Use this mask on the proteinGray image to sum its intensities in and near the location of the cilier.
+
+```{r}
+proteinGrayMasked <- image_join(proteinGray,cilierMaskDil) %>% image_fx_sequence("u*v") # fx_sequence treats mask as a [0,1] image!
+image_ggplot(proteinGrayMasked)
+activity <- my_sum(proteinGrayMasked)
+print(paste("The sum of protein-intensity-values in the mask is: ", activity))
+```
+
+---
+
+The image_morphology() function contains many other functions besides dilation,
+
+```{r}
+morphology_types()
+```
+
+Particularly, 'Erode' is important and does the exact opposite as 'Dilate'. For example, we can make the dilated mask smaller by eroding with disks of various sizes
+
+```{r}
+for (sz in c(1,3,5))
+{
+  szStr <- paste("Disk:",sz,sep="")
+  print(szStr)
+  cilierMaskErodeTest <- image_morphology(cilierMask,"Erode",szStr)
+  print(image_ggplot(cilierMaskErodeTest))
+}
+```
+
+Erosion and dilations can be used in combination, since dilations will tend to flood black wholes in white areas and erosion will tend to remove white specks in black areas, hence their combinations can be used to remove black wholes and white specks.
+
+---
+
+## Assignment 2.3
+Find a threshold for proteinGray, which has a black hole, and use a single dilation followed by a single erosion with the same structure element (same shape and size) to remove the whole. Subtract the thresholded image form the dilated-erode image and visualize the result. Did the process perform as expected?
+
+```{r}
+proteinT = 0.2
+proteinMask <- my_threshold(proteinScaled,proteinT)
+print(image_ggplot(proteinMask))
+proteinSz <- "Disk:3"
+proteinMaskDil <- image_morphology(proteinMask,'Dilate', proteinSz)
+proteinMaskDilErode <- image_morphology(proteinMaskDil,'Erode', proteinSz)
+print(image_ggplot(proteinMaskDilErode))
+print(image_join(proteinMaskDilErode,proteinMask) %>% image_fx_sequence("abs(u-v)") %>% image_ggplot())
+
+# v.1: The dilation followed by an erosion with the same structuring element removed the whole, but it also unexpectedly removed details on the outer boundary of the segment.
+
+# v.2: We were not able to find a threshold which produced a whole in the segment, but we analyzed the dilation followed by an erosion anyway, and unexpectedly removed details on the outer boundary of the segment.
+
+# v.3: We don't understand the notion of a 'black whole', but we choose to interpret it as: ...
+```
+
+---

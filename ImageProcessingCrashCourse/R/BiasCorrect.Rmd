@@ -1,0 +1,280 @@
+---
+title: "3. Object Segmentation and Bias Correction"
+author: "Jon Sporring"
+date: "15/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Object segmentation and Bias correction
+
+Many microscope and medical images have an uneven distribution of light, caused by the physical setup of the imaging device, not the specimens. Here we examine a computed tomography image of a rat's head.
+
+It is assumed that the student has completed the previous module: GettingStarted. The pedagogical plan is that the student receives the code as a jupyter file, runs each stump, correct possible mistakes, and reflects on the output. Some assignments have been added for the student to test his/her understanding of the material.
+
+The demonstration uses a slice from a CT image of the head of a rat. For further information, contact Maiken Nedergaard, Section for Translational Neuroscience, University of Copenhagen
+
+## Loading libraries
+First, we load our favorite collection of libraries and read the image, we'll be working on.
+
+```{r}
+library(magick)
+library(ggplot2)
+library(gridExtra)
+library(magrittr)
+
+# Thresholding an image as a black and white image.
+my_threshold <- function(image, t) {
+  tStr <- paste(100*t,"%",sep="") # image_threshold threshold argument at 0.1 must be on the form "10%"
+  image %>%
+  image_threshold(type = "white", threshold = tStr) %>%
+  image_threshold(type = "black", threshold = tStr) %>%
+  image_convert(colorspace="gray") # newer versions returns sRGB images
+}
+# make a sum of image intensities
+my_sum <- function(image) {
+  sum(as.double(image[[1]]))
+}
+
+# Presume that the image is a gray image and will scale it to full 8-bit range
+image_readTIFFGray <- function(filename) {
+  image_read(filename) %>% 
+  image_convert(colorspace="gray") %>% 
+  image_fx("(u-minima)/(maxima-minima)")
+}
+
+setwd("~/Desktop/BigDataInBiotechnology/r/")
+transverse <- image_readTIFFGray("ratBrainTransverse.tiff")
+image_info(transverse)
+transversePlt<-image_ggplot(transverse)
+transverseHist<-qplot(as.double(transverse[[1]]),geom="histogram",bins=100)
+transverseHist<-transverseHist+labs(title="Histogram of transverse",x="intensity",y="count")
+
+grid.arrange(transversePlt,transverseHist,nrow=1)
+```
+
+## Noise reduction
+Focussing on a subpart of the transverse image, we see that it contains some noise:
+
+```{r}
+geom <- geometry_area(25,25,50,75) # region of interest: (width, height, x_off, y_off)
+transverseCrop <- image_crop(transverse,geom)
+image_ggplot(transverseCrop)
+```
+
+A simple method of noise reduction is to calculate the local median of the pixels in its neighborhood.
+
+```{r}
+transverseCropMed <- image_median(transverseCrop,radius=3)
+transverseCropMedPlt <- image_ggplot(transverseCropMed)
+print(transverseCropMedPlt)
+```
+
+Varying the radius parameter gives a more homogeneous result but also destroys fine detail
+
+```{r}
+radii <- c(3,5,7)
+lst <- vector("list",length(radii)) # create an empty list with space for our result
+for (i in 1:length(radii))
+{
+  lst[[i]] <- transverseCrop %>% # image_ggplot returns a list, so we use double brackets
+    image_median(radius=radii[i]) %>%
+    image_ggplot
+}
+grid.arrange(lst[[1]],lst[[2]],lst[[3]],nrow=1)
+```
+
+The above is an example of a non-linear filter. Instead of the median operator, we can also use averages. Local averages are elegantly expressed as a convolution, which in turn is calculated using the following equation:
+$$(I*W)(v) = \int_\infty^\infty W(w)I(v-w)\,dw,$$
+where $v$ and $w$ are points in space. For example, for 2-dimensional images, $v=(x,y)$. $I$ is the image, and $W$ is the kernel or weighting function. In practice the kernel has a finite size, i.e., zero outside a small region in space, reducing the integral to a finite area of space. Further, our images are discrete, and therefore, the integral is replaced with a sum. In 2 dimensions, this looks like
+$$(I*W)(x,y) = \sum_{\alpha=1}^M\sum_{\beta=1}^N W(\alpha,\beta)I(x-\alpha,y-\beta).$$
+The continuous notation is more elegant and mathematically easier to analyze, so we will use this. However, always when working with discrete images, our algorithms must use an equation converted to the discrete notation.
+
+Averaging kernels are non-negative ($W(w)\geq 0$), and have the property that
+$$\int_\infty^\infty W(w)\, dw=1$$
+In Magick, convolution is done as follows,
+
+```{r}
+transverseCropConv <- image_convolve(transverseCrop,kernel = "3x3: 1 1 1
+                 1 1 1
+                 1 1 1",scaling=1/9)
+transverseCropConvPlt <- image_ggplot(transverseCropConv)
+print(transverseCropConvPlt)
+```
+
+In this example, the kernel specifies that the center pixel and its 8 neighbors are to be multiplied by 1 and added and the result is to be multiplied with 1/9. The scaling factor ensures that the filter sums to 1. This kernel is known as the Uniform kernel.
+
+Instead of specifying the kernel manually, we may also choose one of the predefined,
+
+```{r}
+kernel_types()
+```
+
+and these are applied by setting the kernel parameter to a string with one of the above names.
+
+One kernel with the shape of a normal distribution is also known as a Gaussian, and this is so popular, that a special function is reserved to it: image_blur. The radius parameter is important but safely set to 0 always, in which case it can be ignored.
+
+```{r}
+transverseCropBlur <- image_blur(transverseCrop,radius=0,sigma=1)
+transverseCropBlurPlt <- image_ggplot(transverseCropBlur)
+print(transverseCropBlurPlt)
+```
+
+The argument sigma is the standard deviation of the Gaussian
+
+In the following, we show the median-, uniform-, and Gaussian-smoothed images side-by-side:
+
+```{r}
+grid.arrange(transverseCropMedPlt,transverseCropConvPlt,transverseCropBlurPlt,nrow=1)
+```
+
+It is difficult to align the sizes of these 3 filters, but the chosen values are not far from each other in effect. We notice that each they remove noise in slightly different ways and that all 3 also destroys the fine structures. This is a fundamental effect, filters cannot distinguish the signal from the noise, and we can reduce noise by filtering but not without also destroying some parts of the signal.
+
+---
+
+## Assignment 3.1
+Make 3 Gaussian blurred images of transverseCrop with image_blur and with standard deviations 1, 2, and 4 and show them next to each other with grid.arrange.
+
+```{r}
+
+```
+
+---
+
+## Segmenting objects
+In this section we will work with the median filtered and cropped image and we will work with the task to identify and measure the size of each cavity (the dark areas) in the rat's brain. We can threshold,
+
+```{r}
+thr <- 0.15
+rad <- 3
+# We use my_threshold, but keep in mind that it is the dark areas, we seek.
+cavities <- transverseCrop %>% image_median(radius=rad) %>% my_threshold(thr)
+image_ggplot(cavities)
+```
+
+This image consists of a number of components, some that are white and some that are black. To identify each component, we use the connected-component algorithm image_connect, which produces a new image, where all the pixels of each component has a unique value.
+
+```{r}
+cavitiesComp <- image_connect(cavities)
+image_ggplot(cavitiesComp)
+```
+
+The connected-component algorithm gives each connected component an individual color, and to separate each colored region into an image of its own, we use image_split, which makes a list of sRGB image-bitmaps with the mask in the 4th, alpha channel. This tricky to convert, so below is a function enclosing this:
+
+```{r}
+alphaToGray <- function(image){
+  image %>%
+  image_fx("(1-u)*u.a")%>%
+  image_convert(colorspace="gray",matte=FALSE)
+}
+
+ #keep_color is default, but we want masks not masks and their component number.
+cavitiesLayers <- image_split(cavitiesComp,keep_color = FALSE)
+image_info(cavitiesLayers)
+lst <- vector("list",length(cavitiesLayers)) # create an empty list with space for our result
+for (i in 1:length(cavitiesLayers)) {
+  # im[i] returns and image as opposed to im[[i]] which is the bitmap of the image  
+  lst[[i]] <- cavitiesLayers[i] %>%
+  alphaToGray() %>%
+  image_ggplot()
+}
+grid.arrange(lst[[1]],lst[[2]],lst[[3]],lst[[4]],nrow=1)
+```
+
+Note that 1) the component's masks are black(!), and 2) although the last layer seems empty, close inspection will show that there is something in the bottom right.
+
+---
+
+## Assignment 3.2
+Use my_sum() to calculate the area of each of the black components identified by image_split.
+
+```{r}
+
+```
+
+---
+
+## Bias correction
+In this section we will work with the median filtered image:
+
+```{r}
+thr <- 0.15
+rad <- 3
+transverseMed <- transverse %>% image_median(radius=rad)
+image_ggplot(transverseMed)
+```
+
+In the above image, the values in the bottom right corner are darker than in the middle, while it is not expected that the material imaged is significantly different in these two areas. Such slowly varying changes are often observed and can be caused by misadjustment of instruments or shadowing effects from outside the image. In medical image processing, this is known as a Bias field, and a simple method for removing the bias field is to model the slow variation as a function and subtract it from the image. The following code fits a second degree to a 2-dimensional image at select points.
+
+```{r}
+library(corpcor) # needed to calculate the pseudoinverse
+
+# Convert a bitmap 2 a magick
+bitmap2Magick <- function(bitmap)
+{
+   d <- dim(bitmap) # assuming that bitmap is 2 dimensional
+   bitmap %>%
+       as.numeric %>%
+       as.raw %>%
+       array(c(1,d[1],d[2])) %>%
+       image_read %>%
+       return
+}
+
+# we expect that src and msk are 2-dimensional arrays of the same size. The array msk is a logical values indicating which values from src to include in the fit.
+biasField <- function(image,mask)
+{
+  src <- image[[1]][1,,]
+  msk <- mask[[1]][1,,]>0
+  d <- dim(src)
+  r <- array(rep(1:d[1], times=d[2]), d)
+  c <- as.array(matrix(rep(1:d[2], times=d[1]), ncol=d[2],byrow=TRUE))
+  
+  rMsk <- r[msk]
+  cMsk <- c[msk]
+  
+  A <- cbind(rep(1,length(rMsk)), rMsk, cMsk, rMsk^2, rMsk*cMsk, cMsk^2)
+
+  # We solve for the parameters x in A * x = src
+  x <- pseudoinverse(A) %*% as.integer(src[msk])
+
+  # We generate an image at all image points
+  rVec <- as.vector(r)
+  cVec <- as.vector(c)
+  A <- cbind(rep(1,length(rVec)), rVec, cVec, rVec^2, rVec*cVec, cVec^2)
+  dst <- array(A %*% x,d)
+
+  return(bitmap2Magick(dst))
+}
+```
+
+To fit the data, we ignore as best we can the cavities,
+
+```{r}
+msk <- my_threshold(transverseMed,thr)
+bias <- biasField(transverseMed,msk)
+bias %>% image_fx("(u-minima)/(maxima-minima)") %>% image_ggplot()
+```
+
+The bias field indicates that the image is indeed lighter in the middle than at the edges. Assuming that the bias field is additive, we produce a corrected image by subtracting the bias field from the image. The resulting image will have positive and negative values, so to represent it as a Magick image, we add a constant to the result:
+
+```{r}
+transverseMedCorrected <- image_join(transverseMed,bias) %>% image_fx_sequence("u.mean+u-v")
+image_ggplot(transverseMedCorrected)
+```
+
+The result seems more homogeneously illuminated, but particularly in the bottom, we also notice that the cavities have become lighter as well. One solution could be to repeat the whole process to get a better mask, and in the end, only subtract the bias field from the non-cavity pixels.
+
+---
+
+## Assignment 3.3
+Segment the complete transverse image, with and without bias correction, and show the 3 images. To what extent did bias correction improve the result?
+
+```{r}
+
+```
+
+---

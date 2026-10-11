@@ -5,3 +5,7 @@ Use, e.g., [download-directory.github.io](https://download-directory.github.io/?
 
 Jon Sporring
 August 22, 2024
+
+## LLM co-creation module
+
+[4_LLM/LLM.ipynb](4_LLM/LLM.ipynb) provides a self-contained base case for measuring protein-channel intensity near cilia, using the two images included in that directory. Students develop requirements, design choices, a code specification, quality checks, and an LLM prompt, then run and evaluate the proposed implementation in Jupyter. [LLM_solution.ipynb](4_LLM/LLM_solution.ipynb) contains example planning artefacts and an author-written reference implementation.
